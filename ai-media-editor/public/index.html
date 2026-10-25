@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Talk Edit</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+Arabic:wght@400;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Talk<span>Edit</span></div>
+    <div class="actions">
+      <label class="btn">
+        <input type="file" id="mediaInput" accept="video/*,image/*" hidden />
+        Open video / photo
+      </label>
+      <label class="btn ghost" title="Images you can ask the AI to place as stickers or B-roll">
+        <input type="file" id="assetInput" accept="image/*" multiple hidden />
+        Add images
+      </label>
+      <button class="btn ghost" id="undoBtn" title="Undo (Ctrl+Z)">Undo</button>
+      <button class="btn ghost" id="redoBtn" title="Redo (Ctrl+Shift+Z)">Redo</button>
+      <button class="btn primary" id="exportBtn" disabled>Export</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="stage">
+      <div class="canvas-wrap" id="dropZone">
+        <canvas id="preview" width="720" height="1280"></canvas>
+        <div class="empty" id="emptyState">
+          <p class="big">Drop a video or photo here</p>
+          <p>Then just say what you want: “make it black and white”, “add captions”, “put a title on top”.</p>
+        </div>
+        <div class="busy" id="busy" hidden><span></span> Editing…</div>
+      </div>
+      <div class="transport" id="transport" hidden>
+        <button class="icon" id="playBtn" aria-label="Play">▶</button>
+        <input type="range" id="scrubber" min="0" max="1" step="0.01" value="0" />
+        <span class="time" id="timeLabel">0:00 / 0:00</span>
+      </div>
+      <div class="timeline" id="timeline"></div>
+      <div class="assets" id="assetList"></div>
+    </section>
+
+    <aside class="chat">
+      <div class="messages" id="messages">
+        <div class="msg ai">Hi! Open a video or photo, then tell me what to change. Hold the mic button to talk.</div>
+      </div>
+      <div class="suggestions" id="suggestions">
+        <button>Add captions with key words highlighted</button>
+        <button>Give it a cinematic look</button>
+        <button>Make the first 3 seconds black and white with the label 1944</button>
+        <button>Add a 3-2-1 countdown at the start</button>
+        <button>Put a title at the top</button>
+      </div>
+      <form class="composer" id="composer">
+        <select id="langSelect" title="Speech language">
+          <option value="en-US">EN</option>
+          <option value="ar-SA">عربي</option>
+          <option value="es-ES">ES</option>
+          <option value="fr-FR">FR</option>
+          <option value="de-DE">DE</option>
+          <option value="hi-IN">HI</option>
+          <option value="tr-TR">TR</option>
+          <option value="ur-PK">UR</option>
+        </select>
+        <button type="button" class="mic" id="micBtn" title="Hold to talk (or press Space)">🎙</button>
+        <input id="promptInput" placeholder="Tell me what to edit…" autocomplete="off" dir="auto" />
+        <button class="btn primary" type="submit">Send</button>
+      </form>
+      <label class="speak-toggle"><input type="checkbox" id="speakReplies" /> Read replies aloud</label>
+    </aside>
+  </main>
+
+  <video id="video" playsinline preload="auto" hidden></video>
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>
