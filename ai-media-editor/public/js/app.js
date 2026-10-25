@@ -1,6 +1,10 @@
 import { applyOp, emptyProject } from './ops.js';
-import { outputSize, renderFrame } from './renderer.js';
+import { outputSize, preloadImages, renderFrame } from './renderer.js';
 import { createVoiceInput, speak } from './voice.js';
+import { cutout, personMask, segmenterReady } from './segment.js';
+
+const segmentation = { personMask, cutout };
+const exportSegmentation = { cutout, personMask: (source, kind, redraw) => personMask(source, kind, redraw, true) };
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('preview');
@@ -13,8 +17,7 @@ let redoStack = [];
 let chatHistory = []; // [{ role, text }] sent back to the AI for context
 let imageSource = null;
 let busy = false;
-let audio = null; // { ctx, source } created on first playback, needed to record sound on export
-let recording = false;
+let recording = false; // exporting; the preview loop must not move the playhead
 
 // ---------- project state ----------
 
@@ -63,7 +66,7 @@ const trimEnd = () => project.trim.end ?? project.media?.duration ?? 0;
 
 function draw() {
   const source = project.media?.kind === 'video' ? video : imageSource;
-  renderFrame(ctx, project, project.media ? source : null, currentTime(), draw);
+  renderFrame(ctx, project, project.media ? source : null, currentTime(), draw, segmentation);
   updateTransport();
 }
 
@@ -93,18 +96,8 @@ function updateTransport() {
   $('playBtn').textContent = video.paused ? '▶' : '❚❚';
 }
 
-function ensureAudio() {
-  if (audio) return audio;
-  const audioCtx = new AudioContext();
-  const source = audioCtx.createMediaElementSource(video);
-  source.connect(audioCtx.destination);
-  audio = { ctx: audioCtx, source };
-  return audio;
-}
-
 function togglePlay() {
   if (project.media?.kind !== 'video') return;
-  ensureAudio().ctx.resume();
   if (video.paused) {
     clampToTrim();
     video.play();
@@ -116,7 +109,7 @@ function togglePlay() {
 const LAYER_LABEL = {
   text: (l) => `T  ${l.text}`,
   caption: (l) => `CC ${l.text}`,
-  image: () => 'Image',
+  image: (l) => (l.cutout ? 'Image · cut-out' : 'Image'),
   effect: (l) => `FX ${l.effect.replace(/_/g, ' ')}${l.label ? ` · ${l.label}` : ''}`,
   countdown: (l) => `Countdown ${l.from}`,
   chart: (l) => `Chart ${l.value || l.title}`,
@@ -321,10 +314,7 @@ async function send(message) {
 
 // ---------- export ----------
 
-function pickMimeType() {
-  const types = ['video/mp4;codecs=avc1,mp4a', 'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'];
-  return types.find((t) => MediaRecorder.isTypeSupported(t)) || '';
-}
+const EXPORT_FPS = 30;
 
 function download(blob, name) {
   const a = document.createElement('a');
@@ -334,55 +324,37 @@ function download(blob, name) {
   setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
 }
 
+function seek(t) {
+  return new Promise((resolve) => {
+    video.addEventListener('seeked', resolve, { once: true });
+    video.currentTime = t;
+  });
+}
+
+// Waits until every image and model the project needs is loaded, so no exported frame misses them.
+async function prepareAssets() {
+  const srcs = project.layers.filter((l) => l.type === 'image').map((l) => l.src);
+  if (project.background.mode === 'image' && project.background.src) srcs.push(project.background.src);
+  await preloadImages(srcs);
+  if (project.background.mode !== 'none' || project.layers.some((l) => l.cutout)) await segmenterReady();
+}
+
 async function exportMedia() {
   if (!project.media || recording) return;
-  if (project.media.kind === 'image') {
-    // Render at full resolution for photos.
-    const full = document.createElement('canvas');
-    Object.assign(full, outputSize(project, 4096));
-    renderFrame(full.getContext('2d'), project, imageSource, 0);
-    full.toBlob((blob) => download(blob, 'edited.png'), 'image/png');
-    return;
-  }
-
   recording = true;
-  setBusy(true, 'Rendering video…');
   $('exportBtn').disabled = true;
+  setBusy(true, 'Preparing…');
   try {
-    const { ctx: audioCtx, source } = ensureAudio();
-    await audioCtx.resume();
-    video.pause();
-    video.currentTime = project.trim.start;
-    await new Promise((r) => (video.onseeked = () => { video.onseeked = draw; draw(); r(); }));
-
-    const stream = canvas.captureStream(30);
-    const dest = audioCtx.createMediaStreamDestination();
-    source.connect(dest);
-    dest.stream.getAudioTracks().forEach((t) => stream.addTrack(t));
-    const mimeType = pickMimeType();
-    const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 8_000_000 });
-    const chunks = [];
-    recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
-    const stopped = new Promise((r) => (recorder.onstop = r));
-    recorder.start(250);
-    await video.play();
-    await new Promise((resolve) => {
-      const check = () => (video.currentTime >= trimEnd() || video.ended ? resolve() : requestAnimationFrame(check));
-      check();
-    });
-    video.pause();
-    recorder.stop();
-    await stopped;
-    source.disconnect(dest);
-
-    const blob = new Blob(chunks, { type: mimeType || 'video/webm' });
-    if (blob.type.startsWith('video/mp4')) return download(blob, 'edited.mp4');
-    setBusy(true, 'Converting to MP4…');
-    const body = new FormData();
-    body.append('file', new File([blob], 'export.webm', { type: 'video/webm' }));
-    const res = await fetch('/api/transcode', { method: 'POST', body });
-    if (res.ok) download(await res.blob(), 'edited.mp4');
-    else download(blob, 'edited.webm');
+    await prepareAssets();
+    if (project.media.kind === 'image') {
+      // Render at full resolution for photos.
+      const full = document.createElement('canvas');
+      Object.assign(full, outputSize(project, 4096));
+      renderFrame(full.getContext('2d'), project, imageSource, 0, () => {}, segmentation);
+      download(await new Promise((r) => full.toBlob(r, 'image/png')), 'edited.png');
+      return;
+    }
+    await exportVideo();
   } catch (err) {
     addMessage('ai error', `Export failed: ${err.message}`);
   } finally {
@@ -390,6 +362,46 @@ async function exportMedia() {
     setBusy(false);
     $('exportBtn').disabled = false;
   }
+}
+
+// Renders the video frame by frame (so heavy effects never drop frames), streams the frames
+// to the server, and lets ffmpeg add the original audio.
+async function exportVideo() {
+  video.pause();
+  const frameCanvas = document.createElement('canvas');
+  Object.assign(frameCanvas, outputSize(project, 1920));
+  const frameCtx = frameCanvas.getContext('2d');
+  const { start } = project.trim;
+  const end = trimEnd();
+  const step = project.speed / EXPORT_FPS; // source seconds per output frame
+  const total = Math.max(1, Math.floor((end - start) / step));
+
+  const session = await (await fetch('/api/render', { method: 'POST' })).json();
+  if (session.error) throw new Error(session.error);
+  const inFlight = new Set();
+  for (let i = 0; i < total; i++) {
+    const t = start + i * step;
+    await seek(t);
+    renderFrame(frameCtx, project, video, t, () => {}, exportSegmentation);
+    const blob = await new Promise((r) => frameCanvas.toBlob(r, 'image/jpeg', 0.92));
+    const upload = fetch(`/api/render/${session.id}/frame/${i}`, { method: 'PUT', body: blob }).then((res) => {
+      if (!res.ok) throw new Error('Frame upload failed');
+    });
+    inFlight.add(upload);
+    upload.finally(() => inFlight.delete(upload));
+    if (inFlight.size >= 6) await Promise.race(inFlight);
+    if (i % 10 === 0) setBusy(true, `Rendering ${Math.round((i / total) * 100)}%`);
+  }
+  await Promise.all(inFlight);
+  setBusy(true, 'Encoding MP4…');
+  const res = await fetch(`/api/render/${session.id}/finish`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fps: EXPORT_FPS, media: project.media.url, start, end, speed: project.speed }),
+  });
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Encoding failed');
+  download(await res.blob(), 'edited.mp4');
+  await seek(start);
 }
 
 // ---------- wiring ----------

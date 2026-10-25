@@ -7,7 +7,7 @@ const withVideo = () => ({ ...emptyProject(), media: { kind: 'video', duration: 
 
 test('every tool except auto_captions maps to an operation', () => {
   for (const tool of TOOLS) {
-    if (tool.name !== 'auto_captions') assert.ok(OP_NAMES.includes(tool.name), tool.name);
+    if (!['auto_captions', 'generate_image'].includes(tool.name)) assert.ok(OP_NAMES.includes(tool.name), tool.name);
   }
 });
 
@@ -57,4 +57,13 @@ test('wordsToCaptions groups words by count, pauses and punctuation', () => {
   const w = (text, start) => ({ text, start, end: start + 0.3 });
   const caps = wordsToCaptions([w('a', 0), w('b', 0.3), w('c.', 0.6), w('d', 0.9), w('e', 3), w('f', 3.3)], 4);
   assert.deepEqual(caps.map((c) => c.text), ['a b c.', 'd', 'e f']);
+});
+
+test('set_background validates mode and resolves images', () => {
+  const p = withVideo();
+  p.assets.push({ id: 'A-1', url: '/uploads/bg.png', name: 'bg.png' });
+  assert.equal(applyOp(p, 'set_background', { mode: 'image', asset_id: 'A-1' }).project.background.src, '/uploads/bg.png');
+  assert.equal(applyOp(p, 'set_background', { mode: 'blur', blur: 100 }).project.background.blur, 40);
+  assert.throws(() => applyOp(p, 'set_background', { mode: 'sparkles' }));
+  assert.throws(() => applyOp(p, 'set_background', { mode: 'image' }));
 });

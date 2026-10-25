@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { applyOp, describeProject, TOOLS } from '../public/js/ops.js';
 import { transcribeMedia, wordsToCaptions } from './transcribe.js';
 import { importImageUrl } from './media.js';
+import { generateImage } from './imagegen.js';
 
 const client = new Anthropic();
 const MODEL = process.env.EDITOR_MODEL || 'claude-opus-5-5';
@@ -19,7 +20,9 @@ How to work:
 - You get a snapshot of the current frame. Use it to place things well: don't cover the speaker's face; titles usually go near the top, captions near the bottom.
 - Write on-screen text in the language the user speaks unless they ask otherwise.
 - For photos (media kind "image") timing is ignored; omit start/end.
-- If something isn't possible with the tools (for example generating a new background), say so in one sentence and offer the closest edit you can make.
+- Background changes ("put me on a beach", "make my room look like 1914") use generate_image with purpose background; blur and solid colors use set_background directly.
+- To turn a person in a photo into a sticker, use add_image with cutout true and frame sticker.
+- If something isn't possible with the tools, say so in one sentence and offer the closest edit you can make.
 - After editing, reply with one short sentence describing what changed, in the user's language. No lists, no markdown.`;
 
 async function runTool(project, name, input, mediaPath) {
@@ -38,7 +41,17 @@ async function runTool(project, name, input, mediaPath) {
     }
     return { project: next, result: `Added ${lines.length} captions:\n${lines.join('\n')}` };
   }
-  if (name === 'add_image' && input.url && !input.asset_id) {
+  if (name === 'generate_image') {
+    const asset = await generateImage(String(input.prompt || ''));
+    const withAsset = structuredClone(project);
+    withAsset.assets.push(asset);
+    if (input.purpose === 'background') {
+      const out = applyOp(withAsset, 'set_background', { mode: 'image', asset_id: asset.id });
+      return { project: out.project, result: `Generated ${asset.id} and set it as the background` };
+    }
+    return { project: withAsset, result: `Generated image asset_id ${asset.id}. Place it with add_image.` };
+  }
+  if ((name === 'add_image' || name === 'set_background') && input.url && !input.asset_id) {
     // Download remote images so the canvas stays exportable (no cross-origin tainting).
     const asset = await importImageUrl(input.url);
     const withAsset = structuredClone(project);

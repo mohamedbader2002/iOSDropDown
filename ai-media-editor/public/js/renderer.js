@@ -19,6 +19,16 @@ export function getImage(src, onLoad) {
   return img.complete && img.naturalWidth ? img : null;
 }
 
+export function preloadImages(srcs) {
+  return Promise.all(srcs.map((src) => new Promise((resolve) => {
+    const img = getImage(src, () => {});
+    if (img) return resolve();
+    const pending = imageCache.get(src);
+    pending.addEventListener('load', resolve, { once: true });
+    pending.addEventListener('error', resolve, { once: true });
+  })));
+}
+
 export function outputSize(project, maxSide = 1280) {
   const m = project.media;
   if (!m) return { width: 720, height: 1280 };
@@ -89,8 +99,8 @@ function effectMods(project, t, isImage) {
 
 function drawMedia(ctx, project, source, W, H, mods) {
   const { transform } = project;
-  const sw = source.videoWidth || source.naturalWidth;
-  const sh = source.videoHeight || source.naturalHeight;
+  const sw = source.videoWidth || source.naturalWidth || source.width;
+  const sh = source.videoHeight || source.naturalHeight || source.height;
   if (!sw || !sh) return;
   ctx.save();
   ctx.filter = filterString(project.look, mods);
@@ -105,6 +115,55 @@ function drawMedia(ctx, project, source, W, H, mods) {
   const fit = Math.max(dw / sw, dh / sh) * (mods.dx || mods.dy ? 1.03 : 1);
   ctx.drawImage(source, (-sw * fit) / 2, (-sh * fit) / 2, sw * fit, sh * fit);
   ctx.restore();
+}
+
+function drawCover(ctx, img, w, h) {
+  const iw = img.naturalWidth || img.width;
+  const ih = img.naturalHeight || img.height;
+  const fit = Math.max(w / iw, h / ih);
+  ctx.drawImage(img, (w - iw * fit) / 2, (h - ih * fit) / 2, iw * fit, ih * fit);
+}
+
+// Puts the people from `source` in front of a new background. Returns a canvas to draw
+// instead of the source, or the source itself while the segmentation model loads.
+const bgCanvas = document.createElement('canvas');
+const personCanvas = document.createElement('canvas');
+function composeBackground(project, source, helpers, redraw) {
+  const bg = project.background;
+  if (!bg || bg.mode === 'none' || !helpers?.personMask) return source;
+  const mask = helpers.personMask(source, project.media.kind, redraw);
+  if (!mask) return source;
+  const sw = source.videoWidth || source.naturalWidth;
+  const sh = source.videoHeight || source.naturalHeight;
+  const scale = Math.min(1, 1280 / Math.max(sw, sh));
+  const w = Math.round(sw * scale);
+  const h = Math.round(sh * scale);
+  for (const c of [bgCanvas, personCanvas]) {
+    if (c.width !== w || c.height !== h) Object.assign(c, { width: w, height: h });
+  }
+  const pctx = personCanvas.getContext('2d');
+  pctx.globalCompositeOperation = 'source-over';
+  pctx.clearRect(0, 0, w, h);
+  pctx.drawImage(source, 0, 0, w, h);
+  pctx.globalCompositeOperation = 'destination-in';
+  pctx.drawImage(mask, 0, 0, w, h);
+
+  const bctx = bgCanvas.getContext('2d');
+  bctx.save();
+  if (bg.mode === 'blur') {
+    bctx.filter = `blur(${bg.blur * scale}px)`;
+    bctx.drawImage(source, -w * 0.05, -h * 0.05, w * 1.1, h * 1.1);
+  } else if (bg.mode === 'color') {
+    bctx.fillStyle = bg.color;
+    bctx.fillRect(0, 0, w, h);
+  } else {
+    const img = bg.src && getImage(bg.src, redraw);
+    if (img) drawCover(bctx, img, w, h);
+    else bctx.drawImage(source, 0, 0, w, h);
+  }
+  bctx.restore();
+  bctx.drawImage(personCanvas, 0, 0);
+  return bgCanvas;
 }
 
 function drawVignette(ctx, W, H, amount) {
@@ -268,9 +327,16 @@ function drawCaption(ctx, layer, W, H, t, anim, isImage) {
   ctx.restore();
 }
 
-function drawImageLayer(ctx, layer, W, H, anim, redraw) {
-  const img = getImage(layer.src, redraw);
-  if (!img) return;
+function drawImageLayer(ctx, layer, W, H, anim, redraw, helpers) {
+  const original = getImage(layer.src, redraw);
+  if (!original) return;
+  if (layer.cutout) {
+    // Until the cut-out is ready nothing is drawn, so the full rectangle never flashes in.
+    const cut = helpers?.cutout?.(original, redraw);
+    if (!cut) return;
+    if (!cut.empty) return drawCutoutSticker(ctx, layer, cut, W, H, anim);
+  }
+  const img = original;
   const w = layer.width * W;
   const h = (w * img.naturalHeight) / img.naturalWidth;
   const border = layer.frame === 'none' ? 0 : layer.frame === 'rounded' ? 0 : w * 0.035;
@@ -295,6 +361,32 @@ function drawImageLayer(ctx, layer, W, H, anim, redraw) {
   }
   if (layer.grayscale) ctx.filter = 'grayscale(100%)';
   ctx.drawImage(img, -w / 2, -h / 2, w, h);
+  ctx.restore();
+}
+
+// A person cut out of a photo, with a white outline that follows their shape.
+function drawCutoutSticker(ctx, layer, cut, W, H, anim) {
+  const w = layer.width * W;
+  const h = (w * cut.image.height) / cut.image.width;
+  ctx.save();
+  ctx.globalAlpha = anim.alpha;
+  ctx.translate(layer.x * W, (layer.y + anim.dy) * H);
+  ctx.rotate((layer.rotation * Math.PI) / 180);
+  ctx.scale(anim.scale, anim.scale);
+  if (layer.frame !== 'none' && cut.silhouette) {
+    const r = w * 0.03;
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.35)';
+    ctx.shadowBlur = w * 0.04;
+    for (let i = 0; i < 16; i++) {
+      const a = (i / 16) * Math.PI * 2;
+      ctx.drawImage(cut.silhouette, -w / 2 + Math.cos(a) * r, -h / 2 + Math.sin(a) * r, w, h);
+      if (i === 0) ctx.shadowColor = 'transparent';
+    }
+    ctx.restore();
+  }
+  if (layer.grayscale) ctx.filter = 'grayscale(100%)';
+  ctx.drawImage(cut.image, -w / 2, -h / 2, w, h);
   ctx.restore();
 }
 
@@ -406,15 +498,19 @@ function drawEffectLabels(ctx, labels, W, H) {
   });
 }
 
-/** Renders the project at source time t. `redraw` is called when a lazily loaded image arrives. */
-export function renderFrame(ctx, project, source, t, redraw = () => {}) {
+/**
+ * Renders the project at source time t. `redraw` is called when something loaded lazily
+ * (an image, the segmentation model) becomes ready. `helpers` provides person segmentation:
+ * { personMask(source, kind, redraw), cutout(image, redraw) }.
+ */
+export function renderFrame(ctx, project, source, t, redraw = () => {}, helpers = null) {
   const { width: W, height: H } = ctx.canvas;
   const isImage = project.media?.kind === 'image';
   ctx.save();
   ctx.fillStyle = '#111';
   ctx.fillRect(0, 0, W, H);
   const mods = effectMods(project, t, isImage);
-  if (source) drawMedia(ctx, project, source, W, H, mods);
+  if (source) drawMedia(ctx, project, composeBackground(project, source, helpers, redraw), W, H, mods);
   drawGrain(ctx, W, H, mods.grain, t);
   drawVignette(ctx, W, H, project.look.vignette / 100 + mods.vignette);
 
@@ -423,7 +519,7 @@ export function renderFrame(ctx, project, source, t, redraw = () => {}) {
     const anim = animState(layer, t, isImage);
     if (layer.type === 'text') drawText(ctx, layer, W, H, anim);
     else if (layer.type === 'caption') drawCaption(ctx, layer, W, H, t, anim, isImage);
-    else if (layer.type === 'image') drawImageLayer(ctx, layer, W, H, anim, redraw);
+    else if (layer.type === 'image') drawImageLayer(ctx, layer, W, H, anim, redraw, helpers);
     else if (layer.type === 'countdown') drawCountdown(ctx, layer, W, H, t);
     else if (layer.type === 'chart') drawChart(ctx, layer, W, H, t, isImage);
   }

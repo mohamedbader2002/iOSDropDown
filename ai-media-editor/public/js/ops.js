@@ -7,6 +7,7 @@ export const EFFECTS = [
 export const TEXT_STYLES = ['plain', 'outline', 'card', 'accent', 'label'];
 export const IMAGE_FRAMES = ['none', 'sticker', 'polaroid', 'rounded'];
 export const ANIMATIONS = ['pop', 'fade', 'slide', 'none'];
+export const BACKGROUND_MODES = ['none', 'blur', 'color', 'image'];
 
 export function emptyProject() {
   return {
@@ -16,6 +17,7 @@ export function emptyProject() {
     transform: { rotate: 0, flipH: false, flipV: false, zoom: 1 },
     trim: { start: 0, end: null },
     speed: 1,
+    background: { mode: 'none', color: '#1f3b4d', blur: 14, src: null }, // replaces what's behind the people
     layers: [],
     nextId: 1,
   };
@@ -142,10 +144,22 @@ const handlers = {
       rotation: clamp(num(input.rotation, 0), -45, 45),
       frame: pick(input.frame, IMAGE_FRAMES, 'sticker'),
       grayscale: input.grayscale === true,
+      cutout: input.cutout === true,
       animation: pick(input.animation, ANIMATIONS, 'pop'),
     };
     p.layers.push(layer);
     return `Added image ${layer.id}`;
+  },
+
+  set_background(p, input) {
+    const mode = pick(input.mode, BACKGROUND_MODES, null);
+    if (!mode) throw new Error(`mode must be one of ${BACKGROUND_MODES.join(', ')}`);
+    const bg = { ...emptyProject().background, ...p.background, mode };
+    if (typeof input.color === 'string') bg.color = input.color;
+    if (typeof input.blur === 'number') bg.blur = clamp(input.blur, 2, 40);
+    if (mode === 'image') bg.src = resolveImage(p, input);
+    p.background = bg;
+    return mode === 'none' ? 'Original background restored' : `Background is now ${mode}`;
   },
 
   add_effect(p, input) {
@@ -333,8 +347,35 @@ export const TOOLS = [
         rotation: { type: 'number' },
         frame: { type: 'string', enum: IMAGE_FRAMES, description: 'sticker = white cut-out border, polaroid = photo print' },
         grayscale: { type: 'boolean' },
+        cutout: { type: 'boolean', description: 'Remove the photo background and keep only the person (best with frame sticker for a white outline)' },
         animation: { type: 'string', enum: ANIMATIONS },
       },
+    },
+  },
+  {
+    name: 'set_background',
+    description: 'Replace everything behind the people in the video/photo: blur it, use a solid color, or an image (uploaded asset, URL, or one made with generate_image). mode none restores the original.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        mode: { type: 'string', enum: BACKGROUND_MODES },
+        color: { type: 'string', description: 'CSS color for mode color' },
+        blur: { type: 'number', description: 'Blur strength in pixels for mode blur, default 14' },
+        asset_id: { type: 'string' }, url: { type: 'string' },
+      },
+      required: ['mode'],
+    },
+  },
+  {
+    name: 'generate_image',
+    description: 'Create a new image with an AI image model from a detailed prompt. purpose background sets it as the background behind the people right away; purpose overlay returns an asset_id to use with add_image. To restyle the current room, describe the room from the snapshot (layout, furniture, light) plus the requested style.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        prompt: { type: 'string' },
+        purpose: { type: 'string', enum: ['background', 'overlay'] },
+      },
+      required: ['prompt', 'purpose'],
     },
   },
   {
